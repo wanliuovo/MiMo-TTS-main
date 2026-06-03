@@ -39,7 +39,7 @@ interface SavedRecording extends CloneSample {
   createdAt: string;
   durationMs?: number;
   sizeBytes: number;
-  source: "recorded" | "uploaded";
+  source: "recorded" | "uploaded" | "video";
 }
 
 interface TtsResponse {
@@ -218,6 +218,8 @@ export function App() {
   const [baseUrlInput, setBaseUrlInput] = useState("");
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [configMessage, setConfigMessage] = useState("");
+  const [isExtractingVideo, setIsExtractingVideo] = useState(false);
+  const [reduceVideoBgm, setReduceVideoBgm] = useState(false);
   const [readingText, setReadingText] = useState(readingPrompts[0]);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingLevel, setRecordingLevel] = useState(0);
@@ -413,6 +415,71 @@ export function App() {
     setRecordings(await loadSavedRecordings());
   }
 
+  async function handleCloneVideoFile(event: ChangeEvent<HTMLInputElement>) {
+    setError("");
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    const isSupported =
+      file.type.startsWith("video/") ||
+      /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(file.name);
+    if (!isSupported) {
+      setError("视频样本只支持常见视频文件，例如 mp4、mov、webm。");
+      return;
+    }
+
+    setIsExtractingVideo(true);
+    try {
+      const AudioContextCtor = window.AudioContext || getWebkitAudioContext();
+      const audioContext = new AudioContextCtor();
+      const arrayBuffer = await file.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+      await audioContext.close();
+      const monoSamples = reduceVideoBgm ? await enhanceVoiceFromAudioBuffer(audioBuffer) : mixToMono(audioBuffer);
+
+      if (monoSamples.length < audioBuffer.sampleRate * 2) {
+        setError("视频中的音频太短，建议至少包含 5-10 秒清晰单人声音。");
+        return;
+      }
+
+      const wav = encodeWav(monoSamples, audioBuffer.sampleRate);
+      const base64 = bytesToBase64(wav);
+      if (base64.length > 10 * 1024 * 1024) {
+        setError("提取出的音频超过 10 MB，请换一段更短的视频或先裁剪视频。");
+        return;
+      }
+
+      const createdAt = new Date().toISOString();
+      const name = recordingName.trim() || `${stripExtension(file.name)}-视频音频`;
+      const saved = await saveRecording({
+        id: createId(),
+        name,
+        fileName: `${safeFileName(name)}.wav`,
+        mimeType: "audio/wav",
+        base64,
+        createdAt,
+        durationMs: Math.round(audioBuffer.duration * 1000),
+        sizeBytes: wav.byteLength,
+        source: "video"
+      });
+      setCloneSample(toCloneSample(saved));
+      setActiveCloneRecordingId(saved.id);
+      localStorage.setItem(cloneVoicePreferenceKey, saved.id);
+      setRecordings(await loadSavedRecordings());
+    } catch (videoError) {
+      setError(
+        videoError instanceof Error
+          ? `无法从视频中提取音频：${videoError.message}`
+          : "无法从视频中提取音频，请尝试 mp4、mov 或 webm。"
+      );
+    } finally {
+      setIsExtractingVideo(false);
+    }
+  }
+
   async function startRecording() {
     setError("");
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -532,7 +599,7 @@ export function App() {
     const renamedRecording = {
       ...recording,
       name: nextName,
-      fileName: recording.source === "recorded" ? `${safeFileName(nextName)}.wav` : recording.fileName
+      fileName: recording.source === "recorded" || recording.source === "video" ? `${safeFileName(nextName)}.wav` : recording.fileName
     };
     await saveRecording(renamedRecording);
     setRecordings(await loadSavedRecordings());
@@ -709,7 +776,25 @@ export function App() {
                 <FileAudio size={18} />
                 <span>{cloneSample ? cloneSample.fileName : "选择 mp3 或 wav"}</span>
               </label>
-              <p className="fieldHint">上传后会自动保存到本地音色库，下次可直接选择；Base64 后不超过 10 MB。</p>
+              <label className="filePicker videoPicker">
+                <input
+                  accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi"
+                  disabled={isExtractingVideo}
+                  type="file"
+                  onChange={handleCloneVideoFile}
+                />
+                {isExtractingVideo ? <Loader2 className="spin" size={18} /> : <FileAudio size={18} />}
+                <span>{isExtractingVideo ? "正在提取视频音频..." : "上传视频并提取音频"}</span>
+              </label>
+              <label className="compactCheck">
+                <input
+                  checked={reduceVideoBgm}
+                  type="checkbox"
+                  onChange={(event) => setReduceVideoBgm(event.target.checked)}
+                />
+                <span>从视频提取时尝试去除背景音乐</span>
+              </label>
+              <p className="fieldHint">音频或视频都会自动保存到本地音色库，下次可直接选择；Base64 后不超过 10 MB。</p>
             </section>
           )}
 
@@ -785,7 +870,7 @@ export function App() {
                               }}
                             />
                             <span>
-                              {recording.source === "recorded" ? "现场录音" : "上传文件"} · {formatBytes(recording.sizeBytes)}
+                              {getRecordingSourceLabel(recording.source)} · {formatBytes(recording.sizeBytes)}
                             </span>
                           </div>
                           <div className="recordingButtons">
@@ -808,7 +893,7 @@ export function App() {
                           <div>
                             <strong>{recording.name}</strong>
                             <span>
-                              {recording.source === "recorded" ? "现场录音" : "上传文件"} · {formatBytes(recording.sizeBytes)}
+                              {getRecordingSourceLabel(recording.source)} · {formatBytes(recording.sizeBytes)}
                             </span>
                           </div>
                           <div className="recordingButtons">
@@ -1058,6 +1143,16 @@ function uniqueList(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));
 }
 
+function getRecordingSourceLabel(source: SavedRecording["source"]): string {
+  if (source === "recorded") {
+    return "现场录音";
+  }
+  if (source === "video") {
+    return "视频提取";
+  }
+  return "上传文件";
+}
+
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1093,6 +1188,14 @@ function getWebkitAudioContext(): typeof AudioContext {
   return (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext ?? AudioContext;
 }
 
+function getWebkitOfflineAudioContext(): typeof OfflineAudioContext {
+  return (
+    window as Window & {
+      webkitOfflineAudioContext?: typeof OfflineAudioContext;
+    }
+  ).webkitOfflineAudioContext ?? OfflineAudioContext;
+}
+
 function calculateRms(samples: Float32Array): number {
   let sum = 0;
   for (const sample of samples) {
@@ -1110,6 +1213,57 @@ function mergeFloat32(chunks: Float32Array[]): Float32Array {
     offset += chunk.length;
   }
   return merged;
+}
+
+function mixToMono(audioBuffer: AudioBuffer): Float32Array {
+  const samples = new Float32Array(audioBuffer.length);
+  const channelCount = Math.max(audioBuffer.numberOfChannels, 1);
+
+  for (let channel = 0; channel < channelCount; channel += 1) {
+    const channelData = audioBuffer.getChannelData(channel);
+    for (let index = 0; index < channelData.length; index += 1) {
+      samples[index] += channelData[index] / channelCount;
+    }
+  }
+
+  return samples;
+}
+
+async function enhanceVoiceFromAudioBuffer(audioBuffer: AudioBuffer): Promise<Float32Array> {
+  const OfflineAudioContextCtor = window.OfflineAudioContext || getWebkitOfflineAudioContext();
+  const offlineContext = new OfflineAudioContextCtor(1, audioBuffer.length, audioBuffer.sampleRate);
+  const source = offlineContext.createBufferSource();
+  const highPass = offlineContext.createBiquadFilter();
+  const presence = offlineContext.createBiquadFilter();
+  const lowPass = offlineContext.createBiquadFilter();
+  const compressor = offlineContext.createDynamicsCompressor();
+
+  source.buffer = audioBuffer;
+  highPass.type = "highpass";
+  highPass.frequency.value = 90;
+  highPass.Q.value = 0.7;
+  presence.type = "peaking";
+  presence.frequency.value = 2800;
+  presence.Q.value = 1.1;
+  presence.gain.value = 3;
+  lowPass.type = "lowpass";
+  lowPass.frequency.value = 7600;
+  lowPass.Q.value = 0.7;
+  compressor.threshold.value = -24;
+  compressor.knee.value = 24;
+  compressor.ratio.value = 3;
+  compressor.attack.value = 0.004;
+  compressor.release.value = 0.18;
+
+  source.connect(highPass);
+  highPass.connect(presence);
+  presence.connect(lowPass);
+  lowPass.connect(compressor);
+  compressor.connect(offlineContext.destination);
+  source.start();
+
+  const rendered = await offlineContext.startRendering();
+  return rendered.getChannelData(0).slice();
 }
 
 function encodeWav(samples: Float32Array, sampleRate: number): Uint8Array {

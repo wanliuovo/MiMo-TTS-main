@@ -243,6 +243,20 @@ h2 {
   accent-color: #1d74d8;
 }
 
+.compactCheck {
+  align-items: center;
+  color: #536178;
+  display: flex;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.compactCheck input {
+  accent-color: #1d74d8;
+}
+
 select,
 .filePicker,
 .inlineInput,
@@ -286,6 +300,15 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.videoPicker {
+  margin-top: 8px;
+}
+
+.videoPicker:has(input:disabled) {
+  cursor: wait;
+  opacity: 0.75;
 }
 
 textarea {
